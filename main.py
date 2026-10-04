@@ -74,7 +74,6 @@ def get_chef_status(user_id: int) -> str:
 class AdminState(StatesGroup):
     waiting_for_new_admin_id = State()
     waiting_broadcast_text = State()
-    # Oshpazni tasdiqlash bosqichlari uchun
     waiting_for_chef_type = State()
     waiting_for_chef_name = State()
 
@@ -152,7 +151,7 @@ async def cmd_start(message: types.Message):
     elif status == 'approved':
         await message.answer("Assalomu alaykum! Saroy Restaurant oshpazlar paneliga xush kelibsiz.", reply_markup=get_chef_menu())
 
-# --- DIREKTOR OSHPAZNI SOZLASH JARAYONI (CALLBACK & FSM) ---
+# --- DIREKTOR OSHPAZNI SOZLASH JARAYONI ---
 @dp.callback_query(F.data.startswith("setup_") | F.data.startswith("reject_"))
 async def process_chef_setup(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
@@ -177,7 +176,6 @@ async def process_chef_setup(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("So'rov rad etildi.")
 
     elif action == "setup":
-        # Ma'lumotlarni saqlash uchun FSM'ga target_user_id ni yozamiz
         await state.update_data(target_user_id=target_user_id)
         await callback.message.answer("📝 Oshpaz uchun **toifani (yo'nalishni)** kiriting (Masalan: *Issiq ovqat, Salat, Tandir*):", parse_mode="Markdown")
         await state.set_state(AdminState.waiting_for_chef_type)
@@ -222,7 +220,7 @@ async def get_chef_name_from_admin(message: types.Message, state: FSMContext):
         pass
 
 
-# ================= DIREKTOR BOSHQA FUNKSIYALARI =================
+# ================= DIREKTOR FUNKSIYALARI =================
 
 @dp.message(F.text == "📄 Bugungi ro'yxat")
 async def dir_today_list(message: types.Message):
@@ -230,11 +228,11 @@ async def dir_today_list(message: types.Message):
     
     conn = sqlite3.connect("restaurant.db")
     cursor = conn.cursor()
+    # Faqat mahsulot matnini o'zini olamiz (ismlarsiz)
     cursor.execute("""
-        SELECT chefs.full_name, chefs.chef_type, orders.item_text 
+        SELECT item_text 
         FROM orders 
-        JOIN chefs ON orders.user_id = chefs.user_id 
-        WHERE orders.date = date('now')
+        WHERE date = date('now')
     """)
     orders = cursor.fetchall()
     conn.close()
@@ -244,7 +242,7 @@ async def dir_today_list(message: types.Message):
     else:
         text = "📄 **Bugungi umumiy mahsulotlar ro'yxati:**\n\n"
         for idx, item in enumerate(orders, 1):
-            text += f"{idx}. **{item[0]}** ({item[1]}): {item[2]}\n"
+            text += f"{idx}. {item[0]}\n"
         await message.answer(text, parse_mode="Markdown")
 
 @dp.message(F.text == "⚠️ Kimlar buyurtma bermadi?")
@@ -395,15 +393,38 @@ async def chef_add_order(message: types.Message, state: FSMContext):
 async def save_chef_order(message: types.Message, state: FSMContext):
     order_text = message.text.strip()
     user_id = message.from_user.id
+    user_name = message.from_user.full_name
 
     conn = sqlite3.connect("restaurant.db")
     cursor = conn.cursor()
+    cursor.execute("SELECT full_name, chef_type FROM chefs WHERE user_id = ?", (user_id,))
+    chef_info = cursor.fetchone()
+    
+    chef_real_name = chef_info[0] if chef_info and chef_info[0] else user_name
+    chef_type = chef_info[1] if chef_info and chef_info[1] else "Umumiy"
+
     cursor.execute("INSERT INTO orders (user_id, item_text) VALUES (?, ?)", (user_id, order_text))
     conn.commit()
+
+    cursor.execute("SELECT user_id FROM admins")
+    admins = cursor.fetchall()
     conn.close()
 
     await state.clear()
-    await message.answer("✅ Buyurtmangiz qabul qilindi va direktorga yuborildi!")
+    await message.answer("✅ Buyurtmangiz qabul qilindi va direktorga yuborildi!", reply_markup=get_chef_menu())
+
+    for admin in admins:
+        try:
+            await bot.send_message(
+                admin[0], 
+                f"🚨 **Yangi buyurtma keldi!**\n\n"
+                f"👨‍‍🍳 Oshpaz: **{chef_real_name}**\n"
+                f"🏷 Yo'nalishi: *{chef_type}*\n"
+                f"📦 Tovar: {order_text}",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
 
 @dp.message(F.text == "📄 Mening bugungi ro'yxatim")
 async def chef_my_today(message: types.Message):
