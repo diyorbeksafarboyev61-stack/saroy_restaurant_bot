@@ -46,31 +46,74 @@ def is_admin(user_id: int) -> bool:
 class AdminState(StatesGroup):
     waiting_for_new_admin_id = State()
 
-def get_main_menu(user_id: int):
-    keyboard = []
-    if is_admin(user_id):
-        keyboard.append([KeyboardButton(text="📊 Hisobotlar"), KeyboardButton(text="📢 Xabar tarqatish")])
-        keyboard.append([KeyboardButton(text="➕ Yangi boshliq tayinlash")])
-    keyboard.append([KeyboardButton(text="📋 Buyurtma berish")])
+# 1. Boshliq (Direktor) uchun asosiy menyu
+def get_director_menu():
+    keyboard = [
+        [KeyboardButton(text="📄 Bugungi ro'yxat"), KeyboardButton(text="⚠️️ Kimlar buyurtma bermadi?")],
+        [KeyboardButton(text="💬 Povarlarga xabar"), KeyboardButton(text="📦 Tarix")],
+        [KeyboardButton(text="✅ Sotib olindi"), KeyboardButton(text="🧹 Ro'yxatni tozalash")],
+        [KeyboardButton(text="👥 Povarlar"), KeyboardButton(text="🏷 Povar turlari")],
+        [KeyboardButton(text="➕ Yangi boshliq tayinlash")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+# 2. Oshpaz uchun asosiy menyu
+def get_chef_menu():
+    keyboard = [
+        [KeyboardButton(text="📝 Tovarlar kiritish / Buyurtma berish")],
+        [KeyboardButton(text="📄 Mening bugungi ro'yxatim"), KeyboardButton(text="📦 Mening tarixim")],
+        [KeyboardButton(text="💬 Boshliqqa xabar")]
+    ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
     if is_admin(user_id):
-        await message.answer("Assalomu alaykum, Direktor janoblari! Saroy Restaurant boshqaruv paneliga xush kelibsiz.", reply_markup=get_main_menu(user_id))
+        await message.answer("Assalomu alaykum, Direktor janoblari! Saroy Restaurant boshqaruv paneli:", reply_markup=get_director_menu())
     else:
-        await message.answer("Assalomu alaykum! Saroy Restaurant botiga xush kelibsiz. Marhamat, buyurtma berishingiz mumkin.", reply_markup=get_main_menu(user_id))
+        await message.answer("Assalomu alaykum! Saroy Restaurant oshpazlar paneliga xush kelibsiz.", reply_markup=get_chef_menu())
 
-@dp.message(F.text == "📊 Hisobotlar")
-async def admin_reports(message: types.Message):
+# --- Direktor funksiyalari ---
+@dp.message(F.text == "📄 Bugungi ro'yxat")
+async def dir_today_list(message: types.Message):
     if is_admin(message.from_user.id):
-        await message.answer("📊 Bugungi umumiy hisobotlar va tushumlar:")
+        await message.answer("📄 Bugungi umumiy mahsulotlar ro'yxati (Hozircha bo'sh):")
 
-@dp.message(F.text == "📢 Xabar tarqatish")
-async def admin_broadcast(message: types.Message):
+@dp.message(F.text == "⚠️ Kimlar buyurtma bermadi?")
+async def dir_who_didnt_order(message: types.Message):
     if is_admin(message.from_user.id):
-        await message.answer("📢 Barcha foydalanuvchilarga yuboriladigan xabarni kiriting:")
+        await message.answer("⚠️ Hali mahsulot kiritmagan oshpazlar ro'yxati:")
+
+@dp.message(F.text == "💬 Povarlarga xabar")
+async def dir_msg_to_chefs(message: types.Message):
+    if is_admin(message.from_user.id):
+        await message.answer("💬 Povarlarga yuboriladigan xabarni kiriting:")
+
+@dp.message(F.text == "📦 Tarix")
+async def dir_history(message: types.Message):
+    if is_admin(message.from_user.id):
+        await message.answer("📦 O'tgan kunlardagi buyurtmalar arxivi:")
+
+@dp.message(F.text == "✅ Sotib olindi")
+async def dir_purchased(message: types.Message):
+    if is_admin(message.from_user.id):
+        await message.answer("✅ Bugungi mahsulotlar xarid qilingani tasdiqlandi.")
+
+@dp.message(F.text == "🧹 Ro'yxatni tozalash")
+async def dir_clear_list(message: types.Message):
+    if is_admin(message.from_user.id):
+        await message.answer("🧹 Kun yakunidagi eski ro'yxatlar tozalandi.")
+
+@dp.message(F.text == "👥 Povarlar")
+async def dir_chefs(message: types.Message):
+    if is_admin(message.from_user.id):
+        await message.answer("👥 Xodimlar (povarlar) ro'yxati va boshqaruvi:")
+
+@dp.message(F.text == "🏷 Povar turlari")
+async def dir_chef_types(message: types.Message):
+    if is_admin(message.from_user.id):
+        await message.answer("🏷 Povar yo'nalishlari va turlari:")
 
 @dp.message(F.text == "➕ Yangi boshliq tayinlash")
 async def add_admin_start(message: types.Message, state: FSMContext):
@@ -88,7 +131,6 @@ async def save_new_admin(message: types.Message, state: FSMContext):
         return
     
     new_admin_id = int(text)
-    
     conn = sqlite3.connect("restaurant.db")
     cursor = conn.cursor()
     cursor.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (new_admin_id,))
@@ -98,9 +140,22 @@ async def save_new_admin(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(f"Muvaffaqiyatli! ID si `{new_admin_id}` bo'lgan foydalanuvchi endi **Boshliq** etib tayinlandi.", parse_mode="Markdown")
 
-@dp.message(F.text == "📋 Buyurtma berish")
-async def make_order(message: types.Message):
-    await message.answer("🍽 Menudan taomlarni tanlang.")
+# --- Oshpaz funksiyalari ---
+@dp.message(F.text == "📝 Tovarlar kiritish / Buyurtma berish")
+async def chef_add_order(message: types.Message):
+    await message.answer("📝 Kerakli mahsulot va miqdorni yuboring:")
+
+@dp.message(F.text == "📄 Mening bugungi ro'yxatim")
+async def chef_my_today(message: types.Message):
+    await message.answer("📄 O'zingiz bugun kiritgan mahsulotlar ro'yxati:")
+
+@dp.message(F.text == "📦 Mening tarixim")
+async def chef_my_history(message: types.Message):
+    await message.answer("📦 O'tgan kunlardagi buyurtmalaringiz:")
+
+@dp.message(F.text == "💬 Boshliqqa xabar")
+async def chef_msg_to_admin(message: types.Message):
+    await message.answer("💬 Rahbariyatga yubormoqchi bo'lgan xabaringizni yozing:")
 
 async def main():
     await dp.start_polling(bot)
