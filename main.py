@@ -1,496 +1,176 @@
-import asyncio
 import logging
-import sys
-import sqlite3
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-import os
-from dotenv import load_dotenv
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+    ConversationHandler,
+)
 
-load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+# Loggingni sozlash
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-SUPER_ADMIN_ID = 8491225415
+# --- SOZLAMALAR ---
+# Bu yerga o'zingizning Telegram bot tokeningizni kiriting
+TOKEN = "SIZNING_BOT_TOKENINGIZ"
 
-logging.basicConfig(level=logging.INFO, stream=sys.stdout)
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+# Bu yerga boshliqning (direktorning) Telegram dagi ID raqamini yozing
+DIRECTOR_CHAT_ID = 123456789  # O'z ID raqamingizga o'zgartiring
 
-# --- BAZANI YARATISH VA SOZLASH ---
-def init_db():
-    conn = sqlite3.connect("restaurant.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS admins (
-            user_id INTEGER PRIMARY KEY
+# Suhbat holatlari
+WAITING_FOR_CHEF_MESSAGE = 1
+WAITING_FOR_DIRECTOR_REPLY = 2
+
+
+# --- START BUYrug'I ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    # Oshpazlar uchun menyu tugmasi
+    keyboard = [[InlineKeyboardButton("💬 Boshliqqa xabar yozish", callback_data="write_to_director")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # Agar foydalanuvchi boshliq bo'lsa
+    if user.id == DIRECTOR_CHAT_ID:
+        await update.message.reply_text(
+            f"Assalomu alaykum, Rahbar janoblari! Bot ishga tushdi.\n"
+            f"Oshpazlardan keladigan xabarlar shu yerga keladi va siz ularga to'g'ridan-to'g'ri javob yozishingiz mumkin."
         )
-    """)
-    cursor.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (SUPER_ADMIN_ID,))
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS chefs (
-            user_id INTEGER PRIMARY KEY,
-            full_name TEXT,
-            chef_type TEXT DEFAULT 'Umumiy',
-            status TEXT DEFAULT 'pending'
+    else:
+        await update.message.reply_text(
+            f"Assalomu alaykum, {user.first_name}!\n"
+            f"Saroy restaurant xodimlar botiga xush kelibsiz. Boshliqqa xabar yuborish uchun pastdagi tugmani bosing:",
+            reply_markup=reply_markup,
         )
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            item_text TEXT,
-            date TEXT DEFAULT CURRENT_DATE
-        )
-    """)
-    conn.commit()
-    conn.close()
 
-init_db()
 
-def is_admin(user_id: int) -> bool:
-    if user_id == SUPER_ADMIN_ID:
-        return True
-    conn = sqlite3.connect("restaurant.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id FROM admins WHERE user_id = ?", (user_id,))
-    result = cursor.fetchone()
-    conn.close()
-    return result is not None
+# --- OSHPAZ TOMONIDAN XABAR YOZISHNI BOSHLASH ---
+async def start_writing_to_director(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text(
+        "Marhamat, boshliqqa yubormoqchi bo'lgan xabaringizni yozing (taklif, muammo yoki hisobot):"
+    )
+    return WAITING_FOR_CHEF_MESSAGE
 
-def get_chef_status(user_id: int) -> str:
-    conn = sqlite3.connect("restaurant.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT status FROM chefs WHERE user_id = ?", (user_id,))
-    result = cursor.fetchone()
-    conn.close()
-    return result[0] if result else None
 
-# --- FSM HOLATLARI ---
-class AdminState(StatesGroup):
-    waiting_for_new_admin_id = State()
-    waiting_broadcast_text = State()
-    waiting_for_chef_type = State()
-    waiting_for_chef_name = State()
+# --- OSHPAZNING XABARINI QABUL QILIB, BOSHFAQQA YUBORISH ---
+async def receive_chef_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chef_text = update.message.text
 
-class ChefState(StatesGroup):
-    waiting_for_order_text = State()
-    waiting_for_admin_msg = State()
+    # Oshpazning ID sini va ma'lumotlarini saqlab qo'shamiz (keyin javob qaytarish uchun)
+    context.user_data["last_chef_id"] = user.id
 
-# --- MENYULAR ---
-def get_director_menu():
+    # Boshliqqa yuboriladigan xabar va javob berish tugmasi
     keyboard = [
-        [KeyboardButton(text="📄 Bugungi ro'yxat"), KeyboardButton(text="⚠️ Kimlar buyurtma bermadi?")],
-        [KeyboardButton(text="💬 Povarlarga xabar"), KeyboardButton(text="📦 Tarix")],
-        [KeyboardButton(text="✅ Sotib olindi"), KeyboardButton(text="🧹 Ro'yxatni tozalash")],
-        [KeyboardButton(text="👥 Povarlar"), KeyboardButton(text="🏷 Povar turlari")],
-        [KeyboardButton(text="➕ Yangi boshliq tayinlash")]
+        [InlineKeyboardButton("✍️ Javob yozish", callback_data=f"reply_to_chef_{user.id}")]
     ]
-    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-def get_chef_menu():
-    keyboard = [
-        [KeyboardButton(text="📝 Tovarlar kiritish / Buyurtma berish")],
-        [KeyboardButton(text="📄 Mening bugungi ro'yxatim"), KeyboardButton(text="📦 Mening tarixim")],
-        [KeyboardButton(text="💬 Boshliqqa xabar")]
-    ]
-    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+    message_to_director = (
+        f"📩 **Yangi xabar (Oshpazdan)!**\n\n"
+        f"👤 **Kimdan:** {user.full_name} (@{user.username or 'yo‘q'})\n"
+        f"🆔 **ID:** `{user.id}`\n\n"
+        f"💬 **Xabar matni:**\n{chef_text}"
+    )
 
-# --- START BUYRUĞI ---
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    user_id = message.from_user.id
-    full_name = message.from_user.full_name
+    # Boshliqqa xabarni yuboramiz
+    await context.bot.send_message(
+        chat_id=DIRECTOR_CHAT_ID,
+        text=message_to_director,
+        parse_mode="Markdown",
+        reply_markup=reply_markup,
+    )
 
-    if is_admin(user_id):
-        await message.answer("Assalomu alaykum, Direktor janoblari! Saroy Restaurant boshqaruv paneli:", reply_markup=get_director_menu())
-        return
+    await update.message.reply_text(
+        "✅ Xabaringiz boshliqqa muvaffaqiyatli yuborildi! Javob kelishini kuting."
+    )
+    return ConversationHandler.END
 
-    status = get_chef_status(user_id)
 
-    if status is None:
-        conn = sqlite3.connect("restaurant.db")
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO chefs (user_id, full_name, chef_type, status) VALUES (?, ?, ?, ?)", 
-                       (user_id, full_name, "Umumiy", "pending"))
-        conn.commit()
-        conn.close()
+# --- BOSHLIQ "JAVOB YOZISH" TUGMASINI BOSGANDA ---
+async def director_click_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-        await message.answer("⏳ Sizning so'rovingiz boshliqlarga yuborildi. Direktor tasdiqlashini kuting...")
-
-        conn = sqlite3.connect("restaurant.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id FROM admins")
-        admins = cursor.fetchall()
-        conn.close()
-
-        inline_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Tasdiqlash va sozlash", callback_data=f"setup_{user_id}"),
-                InlineKeyboardButton(text="❌ Rad etish", callback_data=f"reject_{user_id}")
-            ]
-        ])
-
-        for admin in admins:
-            try:
-                await bot.send_message(
-                    admin[0], 
-                    f"👤 **Yangi oshpaz ro'yxatdan o'tmoqchi!**\n\nTelegram Ismi: {full_name}\nID: `{user_id}`", 
-                    reply_markup=inline_kb, 
-                    parse_mode="Markdown"
-                )
-            except Exception:
-                pass
-
-    elif status == 'pending':
-        await message.answer("⏳ So'rovingiz ko'rib chiqilmoqda. Direktor tasdiqlashini kuting...")
-    elif status == 'approved':
-        await message.answer("Assalomu alaykum! Saroy Restaurant oshpazlar paneliga xush kelibsiz.", reply_markup=get_chef_menu())
-
-# --- DIREKTOR OSHPAZNI SOZLASH JARAYONI ---
-@dp.callback_query(F.data.startswith("setup_") | F.data.startswith("reject_"))
-async def process_chef_setup(callback: types.CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Sizda bu huquq yo'q!", show_alert=True)
-        return
-
-    action, user_id_str = callback.data.split("_")
-    target_user_id = int(user_id_str)
-
-    if action == "reject":
-        conn = sqlite3.connect("restaurant.db")
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM chefs WHERE user_id = ?", (target_user_id,))
-        conn.commit()
-        conn.close()
-
-        await callback.message.edit_text(callback.message.text + "\n\n❌ **Holat: Rad etildi**", parse_mode="Markdown")
-        try:
-            await bot.send_message(target_user_id, "❌ Kechirasiz, direktor sizning so'rovingizni rad etdi.")
-        except Exception:
-            pass
-        await callback.answer("So'rov rad etildi.")
-
-    elif action == "setup":
-        await state.update_data(target_user_id=target_user_id)
-        await callback.message.answer("📝 Oshpaz uchun **toifani (yo'nalishni)** kiriting (Masalan: *Issiq ovqat, Salat, Tandir*):", parse_mode="Markdown")
-        await state.set_state(AdminState.waiting_for_chef_type)
-        await callback.answer()
-
-@dp.message(AdminState.waiting_for_chef_type)
-async def get_chef_type_from_admin(message: types.Message, state: FSMContext):
-    chef_type = message.text.strip()
-    await state.update_data(chef_type=chef_type)
+    # Callback datadan oshpazning ID raqamini ajratib olamiz (masalan: reply_to_chef_12345678)
+    data_parts = query.data.split("_")
+    chef_id = int(data_parts[-1])
     
-    await message.answer("✍️ Endi bu oshpaz uchun **ismini** kiriting (Restorandagi haqiqiy ismi yoki familiyasi):")
-    await state.set_state(AdminState.waiting_for_chef_name)
+    # Vaqtincha xotirada qaysi oshpazga javob yozilayotganini saqlaymiz
+    context.user_data["reply_to_chef_id"] = chef_id
 
-@dp.message(AdminState.waiting_for_chef_name)
-async def get_chef_name_from_admin(message: types.Message, state: FSMContext):
-    chef_name = message.text.strip()
-    data = await state.get_data()
-    target_user_id = data.get("target_user_id")
-    chef_type = data.get("chef_type")
+    await query.message.reply_text(
+        f"✍️ Ushbu oshpazga yubormoqchi bo'lgan javobingizni hozir yozib yuboring:"
+    )
+    return WAITING_FOR_DIRECTOR_REPLY
 
-    conn = sqlite3.connect("restaurant.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        UPDATE chefs 
-        SET full_name = ?, chef_type = ?, status = 'approved' 
-        WHERE user_id = ?
-    """, (chef_name, chef_type, target_user_id))
-    conn.commit()
-    conn.close()
 
-    await state.clear()
-    await message.answer(f"✅ Muvaffaqiyatli!\nIsmi: **{chef_name}**\nToifasi: **{chef_type}**\nOshpaz tasdiqlandi va tizimga qo'shildi!", parse_mode="Markdown")
+# --- BOSHLIQNING JAVOBINI OSHPAZGA YETKAZISH ---
+async def send_director_reply_to_chef(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chef_id = context.user_data.get("reply_to_chef_id")
+    director_reply_text = update.message.text
+
+    if not chef_id:
+        await update.message.reply_text("❌ Xatolik: Qaysi oshpazga javob yozilishi aniqlanmadi.")
+        return ConversationHandler.END
 
     try:
-        await bot.send_message(
-            target_user_id, 
-            f"🎉 Tabriklaymiz! Direktor sizning so'rovingizni tasdiqladi.\n🏷 Toifangiz: **{chef_type}**\nIsmingiz: **{chef_name}**", 
-            reply_markup=get_chef_menu(), 
-            parse_mode="Markdown"
+        # Javobni oshpazga jo'natamiz
+        await context.bot.send_message(
+            chat_id=chef_id,
+            text=f"👨‍💼 **Boshliqdan javob:**\n\n{director_reply_text}",
+            parse_mode="Markdown",
         )
-    except Exception:
-        pass
+        await update.message.reply_text("✅ Javobingiz oshpazga muvaffaqiyatli yuborildi!")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Xabarni yuborishda xatolik yuz berdi: {e}")
+
+    return ConversationHandler.END
 
 
-# ================= DIREKTOR FUNKSIYALARI =================
-
-@dp.message(F.text == "📄 Bugungi ro'yxat")
-async def dir_today_list(message: types.Message):
-    if not is_admin(message.from_user.id): return
-    
-    conn = sqlite3.connect("restaurant.db")
-    cursor = conn.cursor()
-    # Faqat mahsulot matnini o'zini olamiz (ismlarsiz)
-    cursor.execute("""
-        SELECT item_text 
-        FROM orders 
-        WHERE date = date('now')
-    """)
-    orders = cursor.fetchall()
-    conn.close()
-
-    if not orders:
-        await message.answer("📄 Bugun hali hech qanday tovar kiritilmagan.")
-    else:
-        text = "📄 **Bugungi umumiy mahsulotlar ro'yxati:**\n\n"
-        for idx, item in enumerate(orders, 1):
-            text += f"{idx}. {item[0]}\n"
-        await message.answer(text, parse_mode="Markdown")
-
-@dp.message(F.text == "⚠️ Kimlar buyurtma bermadi?")
-async def dir_who_didnt_order(message: types.Message):
-    if not is_admin(message.from_user.id): return
-    
-    conn = sqlite3.connect("restaurant.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT full_name, chef_type FROM chefs 
-        WHERE status = 'approved' AND user_id NOT IN (SELECT DISTINCT user_id FROM orders WHERE date = date('now'))
-    """)
-    lazy_chefs = cursor.fetchall()
-    conn.close()
-
-    if not lazy_chefs:
-        await message.answer("👍 Hamma tasdiqlangan oshpazlar bugungi buyurtmalarini kiritib bo'lishgan!")
-    else:
-        text = "⚠️ **Hali mahsulot kiritmagan oshpazlar:**\n\n"
-        for chef in lazy_chefs:
-            text += f"- {chef[0]} ({chef[1]})\n"
-        await message.answer(text, parse_mode="Markdown")
-
-@dp.message(F.text == "💬 Povarlarga xabar")
-async def dir_msg_to_chefs(message: types.Message, state: FSMContext):
-    if not is_admin(message.from_user.id): return
-    await message.answer("💬 Barcha oshpazlarga yubormoqchi bo'lgan xabaringizni kiriting:")
-    await state.set_state(AdminState.waiting_broadcast_text)
-
-@dp.message(AdminState.waiting_broadcast_text)
-async def send_broadcast(message: types.Message, state: FSMContext):
-    text_to_send = message.text
-    conn = sqlite3.connect("restaurant.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id FROM chefs WHERE status = 'approved'")
-    chefs = cursor.fetchall()
-    conn.close()
-
-    count = 0
-    for chef in chefs:
-        try:
-            await bot.send_message(chef[0], f"📢 **Boshliqlardan xabar:**\n\n{text_to_send}", parse_mode="Markdown")
-            count += 1
-        except Exception:
-            pass
-
-    await state.clear()
-    await message.answer(f"✅ Xabar {count} ta tasdiqlangan oshpazga yuborildi!")
-
-@dp.message(F.text == "📦 Tarix")
-async def dir_history(message: types.Message):
-    if not is_admin(message.from_user.id): return
-    
-    conn = sqlite3.connect("restaurant.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT date FROM orders ORDER BY date DESC LIMIT 7")
-    dates = cursor.fetchall()
-    conn.close()
-
-    if not dates:
-        await message.answer("📦 Tarixda hali buyurtmalar mavjud emas.")
-    else:
-        text = "📦 **O'tgan kunlardagi buyurtma sanalari:**\n\n"
-        for d in dates:
-            text += f"📅 {d[0]}\n"
-        await message.answer(text, parse_mode="Markdown")
-
-@dp.message(F.text == "✅ Sotib olindi")
-async def dir_purchased(message: types.Message):
-    if not is_admin(message.from_user.id): return
-    await message.answer("✅ Bugungi mahsulotlar xarid qilingani tasdiqlandi.")
-
-@dp.message(F.text == "🧹 Ro'yxatni tozalash")
-async def dir_clear_list(message: types.Message):
-    if not is_admin(message.from_user.id): return
-    
-    conn = sqlite3.connect("restaurant.db")
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM orders WHERE date = date('now')")
-    conn.commit()
-    conn.close()
-    await message.answer("🧹 Bugungi barcha ro'yxat tozalandi.")
-
-@dp.message(F.text == "👥 Povarlar")
-async def dir_chefs(message: types.Message):
-    if not is_admin(message.from_user.id): return
-    
-    conn = sqlite3.connect("restaurant.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT full_name, chef_type, user_id FROM chefs WHERE status = 'approved'")
-    chefs = cursor.fetchall()
-    conn.close()
-
-    if not chefs:
-        await message.answer("Hozircha tasdiqlangan oshpazlar yo'q.")
-    else:
-        text = "👥 **Tasdiqlangan oshpazlar ro'yxati:**\n\n"
-        for c in chefs:
-            text += f"- {c[0]} | Yo'nalishi: *{c[1]}* (ID: `{c[2]}`)\n"
-        await message.answer(text, parse_mode="Markdown")
-
-@dp.message(F.text == "🏷 Povar turlari")
-async def dir_chef_types(message: types.Message):
-    if not is_admin(message.from_user.id): return
-    await message.answer("🏷 Oshpazlar o'z yo'nalishlari bo'yicha direktor tomonidan tasdiqlanadi.")
-
-@dp.message(F.text == "➕ Yangi boshliq tayinlash")
-async def add_admin_start(message: types.Message, state: FSMContext):
-    if message.from_user.id == SUPER_ADMIN_ID:
-        await message.answer("Yangi boshliq qilmoqchi bo'lgan odamning **Telegram ID raqamini** yuboring:\n*(Masalan: 123456789)*")
-        await state.set_state(AdminState.waiting_for_new_admin_id)
-    else:
-        await message.answer("Kechirasiz, faqat bosh direktor yangi boshliq tayinlay oladi.")
-
-@dp.message(AdminState.waiting_for_new_admin_id)
-async def save_new_admin(message: types.Message, state: FSMContext):
-    text = message.text.strip()
-    if not text.isdigit():
-        await message.answer("Iltimos, faqat raqamlardan iborat to'g'ri Telegram ID kiriting:")
-        return
-    
-    new_admin_id = int(text)
-    conn = sqlite3.connect("restaurant.db")
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (new_admin_id,))
-    conn.commit()
-    conn.close()
-
-    await state.clear()
-    await message.answer(f"Muvaffaqiyatli! ID si `{new_admin_id}` bo'lgan foydalanuvchi endi **Boshliq** etib tayinlandi.", parse_mode="Markdown")
+# --- BEKOR QILISH ---
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Amaliyot bekor qilindi.")
+    return ConversationHandler.END
 
 
-# ================= OSHPAZ FUNKSIYALARI =================
+def main():
+    # Bot ilovasini yaratish
+    app = ApplicationBuilder().token(TOKEN).build()
 
-@dp.message(F.text == "📝 Tovarlar kiritish / Buyurtma berish")
-async def chef_add_order(message: types.Message, state: FSMContext):
-    if is_admin(message.from_user.id):
-        await message.answer("Siz Directorsiz, bu bo'lim oshpazlar uchun.")
-        return
-    if get_chef_status(message.from_user.id) != 'approved':
-        await message.answer("❌ Siz hali direktor tomonidan tasdiqlanmagansiz!")
-        return
+    # Oshpazning xabar yuborish jarayoni uchun ConversationHandler
+    chef_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(start_writing_to_director, pattern="^write_to_director$")],
+        states={
+            WAITING_FOR_CHEF_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_chef_message)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
 
-    await message.answer("📝 Kerakli mahsulotlar va miqdorni yuboring (Masalan: *Go'sht - 5 kg, Yog' - 2 litr*):", parse_mode="Markdown")
-    await state.set_state(ChefState.waiting_for_order_text)
+    # Boshliqning javob yozish jarayoni uchun ConversationHandler
+    director_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(director_click_reply, pattern="^reply_to_chef_")],
+        states={
+            WAITING_FOR_DIRECTOR_REPLY: [MessageHandler(filters.TEXT & ~filters.COMMAND, send_director_reply_to_chef)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
 
-@dp.message(ChefState.waiting_for_order_text)
-async def save_chef_order(message: types.Message, state: FSMContext):
-    order_text = message.text.strip()
-    user_id = message.from_user.id
-    user_name = message.from_user.full_name
+    # Handlerlarni qo'shish
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(chef_conv_handler)
+    app.add_handler(director_conv_handler)
 
-    conn = sqlite3.connect("restaurant.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT full_name, chef_type FROM chefs WHERE user_id = ?", (user_id,))
-    chef_info = cursor.fetchone()
-    
-    chef_real_name = chef_info[0] if chef_info and chef_info[0] else user_name
-    chef_type = chef_info[1] if chef_info and chef_info[1] else "Umumiy"
+    print("Bot ishga tushdi...")
+    app.run_polling()
 
-    cursor.execute("INSERT INTO orders (user_id, item_text) VALUES (?, ?)", (user_id, order_text))
-    conn.commit()
-
-    cursor.execute("SELECT user_id FROM admins")
-    admins = cursor.fetchall()
-    conn.close()
-
-    await state.clear()
-    await message.answer("✅ Buyurtmangiz qabul qilindi va direktorga yuborildi!", reply_markup=get_chef_menu())
-
-    for admin in admins:
-        try:
-            await bot.send_message(
-                admin[0], 
-                f"🚨 **Yangi buyurtma keldi!**\n\n"
-                f"👨‍‍🍳 Oshpaz: **{chef_real_name}**\n"
-                f"🏷 Yo'nalishi: *{chef_type}*\n"
-                f"📦 Tovar: {order_text}",
-                parse_mode="Markdown"
-            )
-        except Exception:
-            pass
-
-@dp.message(F.text == "📄 Mening bugungi ro'yxatim")
-async def chef_my_today(message: types.Message):
-    user_id = message.from_user.id
-    if get_chef_status(user_id) != 'approved':
-        await message.answer("❌ Siz hali tasdiqlanmagansiz.")
-        return
-
-    conn = sqlite3.connect("restaurant.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT item_text FROM orders WHERE user_id = ? AND date = date('now')", (user_id,))
-    orders = cursor.fetchall()
-    conn.close()
-
-    if not orders:
-        await message.answer("📄 Bugun hali hech qanday tovar kiritmagansiz.")
-    else:
-        text = "📄 **Siz bugun kiritgan mahsulotlar:**\n\n"
-        for idx, item in enumerate(orders, 1):
-            text += f"{idx}. {item[0]}\n"
-        await message.answer(text, parse_mode="Markdown")
-
-@dp.message(F.text == "📦 Mening tarixim")
-async def chef_my_history(message: types.Message):
-    user_id = message.from_user.id
-    if get_chef_status(user_id) != 'approved':
-        await message.answer("❌ Siz hali tasdiqlanmagansiz.")
-        return
-
-    conn = sqlite3.connect("restaurant.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT date, item_text FROM orders WHERE user_id = ? ORDER BY date DESC LIMIT 10", (user_id,))
-    orders = cursor.fetchall()
-    conn.close()
-
-    if not orders:
-        await message.answer("📦 Tarixingizda buyurtmalar yo'q.")
-    else:
-        text = "📦 **Sizning oxirgi buyurtmalaringiz:**\n\n"
-        for o in orders:
-            text += f"📅 {o[0]} — {o[1]}\n"
-        await message.answer(text, parse_mode="Markdown")
-
-@dp.message(F.text == "💬 Boshliqqa xabar")
-async def chef_msg_to_admin_start(message: types.Message, state: FSMContext):
-    if get_chef_status(message.from_user.id) != 'approved':
-        await message.answer("❌ Siz hali tasdiqlanmagansiz.")
-        return
-
-    await message.answer("💬 Rahbariyatga yubormoqchi bo'lgan xabaringizni yozing:")
-    await state.set_state(ChefState.waiting_for_admin_msg)
-
-@dp.message(ChefState.waiting_for_admin_msg)
-async def chef_send_msg_to_admin(message: types.Message, state: FSMContext):
-    text_msg = message.text
-    chef_name = message.from_user.full_name
-    await state.clear()
-
-    try:
-        await bot.send_message(SUPER_ADMIN_ID, f"💬 **Oshpazdan xabar ({chef_name}):**\n\n{text_msg}", parse_mode="Markdown")
-        await message.answer("✅ Xabaringiz boshliqqa muvaffaqiyatli yuborildi!")
-    except Exception:
-        await message.answer("❌ Xabar yuborishda xatolik yuz berdi.")
-
-async def main():
-    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
